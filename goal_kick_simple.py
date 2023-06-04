@@ -1,6 +1,7 @@
 # uh oh
 # that's a bad name let's hope it changes
 
+import os
 import tensorflow as tf
 import numpy as np
 from tf_agents.environments import py_environment, tf_environment, tf_py_environment, utils, wrappers, suite_gym
@@ -15,10 +16,13 @@ from tf_agents.replay_buffers import tf_uniform_replay_buffer
 from tf_agents.utils import common
 from tf_agents.drivers import py_driver, dynamic_episode_driver
 from tf_agents.utils import common
+from tf_agents.policies import PolicySaver
 import matplotlib.pyplot as plt
 import random as rand
+from datetime import datetime
 
 LEARNING_RATE = 1
+NAME = "Goal_Kick_Simple"
 
 class GridWorldEnv(py_environment.PyEnvironment):
     def __init__(self):
@@ -146,71 +150,74 @@ def collect_step(environment, policy):
     # Add trajectory to the replay buffer
     replay_buffer.add_batch(traj)
 
-# parameter settings
-num_iterations = 100000  
-initial_collect_steps = 1000  
-collect_steps_per_iteration = 1  
-replay_buffer_capacity = 100000  
-fc_layer_params = (100,45)
-batch_size = 128 # 
-learning_rate = 1e-5  
-log_interval = 200   
-num_eval_episodes = 2
-eval_interval = 1000  
 
-train_py_env = wrappers.TimeLimit(GridWorldEnv(), duration=100)
-eval_py_env = wrappers.TimeLimit(GridWorldEnv(), duration=100)
-train_env = tf_py_environment.TFPyEnvironment(train_py_env)
-eval_env = tf_py_environment.TFPyEnvironment(eval_py_env)
+def init_model():
+    # parameter settings
+    num_iterations = 80000  
+    initial_collect_steps = 1000  
+    collect_steps_per_iteration = 1  
+    replay_buffer_capacity = 100000  
+    fc_layer_params = (100,45)
+    batch_size = 128 # 
+    learning_rate = 1e-5  
+    log_interval = 200   
+    num_eval_episodes = 2
+    eval_interval = 1000  
 
-q_net = q_network.QNetwork(
-        train_env.observation_spec(),
-        train_env.action_spec(),
-        fc_layer_params=fc_layer_params)
+    train_py_env = wrappers.TimeLimit(GridWorldEnv(), duration=100)
+    eval_py_env = wrappers.TimeLimit(GridWorldEnv(), duration=100)
+    train_env = tf_py_environment.TFPyEnvironment(train_py_env)
+    eval_env = tf_py_environment.TFPyEnvironment(eval_py_env)
 
-optimizer = tf.compat.v1.train.AdamOptimizer(learning_rate=learning_rate)
+    q_net = q_network.QNetwork(
+            train_env.observation_spec(),
+            train_env.action_spec(),
+            fc_layer_params=fc_layer_params)
 
-train_step_counter = tf.compat.v2.Variable(0)
+    optimizer = tf.compat.v1.train.AdamOptimizer(learning_rate=learning_rate)
 
-tf_agent = dqn_agent.DqnAgent(
-        train_env.time_step_spec(),
-        train_env.action_spec(),
-        q_network=q_net,
-        optimizer=optimizer,
-        td_errors_loss_fn = common.element_wise_squared_loss,
-        train_step_counter=train_step_counter)
+    train_step_counter = tf.compat.v2.Variable(0)
 
-tf_agent.initialize()
-eval_policy = tf_agent.policy
-collect_policy = tf_agent.collect_policy
+    tf_agent = dqn_agent.DqnAgent(
+            train_env.time_step_spec(),
+            train_env.action_spec(),
+            q_network=q_net,
+            optimizer=optimizer,
+            td_errors_loss_fn = common.element_wise_squared_loss,
+            train_step_counter=train_step_counter)
 
-replay_buffer = tf_uniform_replay_buffer.TFUniformReplayBuffer(
-        data_spec = tf_agent.collect_data_spec,
-        batch_size = train_env.batch_size,
-        max_length = replay_buffer_capacity)
-print("Batch Size: {}".format(train_env.batch_size))
-replay_observer = [replay_buffer.add_batch]
-train_metrics = [
-            tf_metrics.NumberOfEpisodes(),
-            tf_metrics.EnvironmentSteps(),
-            tf_metrics.AverageReturnMetric(),
-            tf_metrics.AverageEpisodeLengthMetric(),
-]
+    tf_agent.initialize()
+    eval_policy = tf_agent.policy
+    collect_policy = tf_agent.collect_policy
 
-dataset = replay_buffer.as_dataset(
-            num_parallel_calls=3,
-            sample_batch_size=batch_size,
-    num_steps=2).prefetch(3)
+    replay_buffer = tf_uniform_replay_buffer.TFUniformReplayBuffer(
+            data_spec = tf_agent.collect_data_spec,
+            batch_size = train_env.batch_size,
+            max_length = replay_buffer_capacity)
+    print("Batch Size: {}".format(train_env.batch_size))
+    replay_observer = [replay_buffer.add_batch]
+    train_metrics = [
+                tf_metrics.NumberOfEpisodes(),
+                tf_metrics.EnvironmentSteps(),
+                tf_metrics.AverageReturnMetric(),
+                tf_metrics.AverageEpisodeLengthMetric(),
+    ]
 
-driver = dynamic_step_driver.DynamicStepDriver(
-            train_env,
-            collect_policy,
-            observers=replay_observer + train_metrics,
-    num_steps=1)
-iterator = iter(dataset)
-print(compute_avg_return(eval_env, tf_agent.policy, num_eval_episodes))
-tf_agent.train = common.function(tf_agent.train)
-tf_agent.train_step_counter.assign(0)
+    dataset = replay_buffer.as_dataset(
+                num_parallel_calls=3,
+                sample_batch_size=batch_size,
+        num_steps=2).prefetch(3)
+
+    driver = dynamic_step_driver.DynamicStepDriver(
+                train_env,
+                collect_policy,
+                observers=replay_observer + train_metrics,
+        num_steps=1)
+    iterator = iter(dataset)
+    print(compute_avg_return(eval_env, tf_agent.policy, num_eval_episodes))
+    tf_agent.train = common.function(tf_agent.train)
+    tf_agent.train_step_counter.assign(0)
+    
 final_time_step, policy_state = driver.run()
 
 episode_len = []
@@ -230,6 +237,10 @@ for i in range(num_iterations):
         print('step = {0}: Average Return = {1}'.format(step, avg_return))
     if step % 350 == 0:
         render_progress(eval_env, tf_agent.policy)
+
+
+saver = PolicySaver(tf_agent.policy)
+saver.save('./'+NAME+'_policy_'+datetime.now().strftime("%d-%m-%Y-%H%M%S"))
 
 plt.plot(step_len, episode_len)
 plt.xlabel('Episodes')
